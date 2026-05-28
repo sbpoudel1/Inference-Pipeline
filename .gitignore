@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Project artifacts
+outputs/
+data/samples/*
+!data/samples/.gitkeep
+
+#Private docs
+for_a_manager.html
+
+# Model caches
+*.onnx
+*.pt
+*.pth
+
+# Editors
+.vscode/
+.idea/
+.DS_Store
+
+# Tooling
+.claude/

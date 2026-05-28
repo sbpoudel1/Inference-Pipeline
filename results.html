@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>CV Inference Pipeline — Results</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 860px;
+    margin: 40px auto;
+    padding: 0 24px 80px;
+    line-height: 1.55;
+    color: #1f2328;
+    background: #fdfdfc;
+  }
+  h1 { border-bottom: 2px solid #1f2328; padding-bottom: 8px; }
+  h2 { margin-top: 40px; border-bottom: 1px solid #d0d7de; padding-bottom: 4px; }
+  h3 { margin-top: 28px; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
+  code { background: #eef1f4; padding: 1px 5px; border-radius: 3px; }
+  pre {
+    background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px;
+    padding: 12px 14px; overflow-x: auto; line-height: 1.45;
+  }
+  pre code { background: transparent; padding: 0; }
+  .note { background: #fff8e1; border-left: 4px solid #d4a017; padding: 10px 14px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+  th, td { border: 1px solid #d0d7de; padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { background: #f6f8fa; }
+  hr { border: none; border-top: 1px solid #d0d7de; margin: 32px 0; }
+  .pill {
+    display: inline-block; font-size: 0.75em; padding: 2px 8px; border-radius: 10px;
+    background: #dafbe1; color: #1a7f37; font-weight: 600;
+  }
+  .crosslink { font-size: 0.9em; color: #57606a; }
+  a { color: #0969da; }
+  blockquote {
+    border-left: 4px solid #d0d7de; margin: 16px 0; padding: 8px 16px;
+    background: #f6f8fa; color: #1f2328;
+  }
+</style>
+</head>
+<body>
+
+<h1>CV Inference Pipeline — Results</h1>
+<p class="crosslink">What we actually built and measured. For the conceptual primer, see <a href="explainer.html">explainer.html</a>.</p>
+
+<!-- ============================================================ -->
+<h2>Overall status</h2>
+
+<table>
+<tr><th>Phase</th><th>Outcome</th><th>Status</th></tr>
+<tr><td>1 — Baseline</td><td>PyTorch detector running on 8 sample images</td><td><span class="pill">DONE</span></td></tr>
+<tr><td>2 — ONNX export + parity</td><td>Numerically equivalent to PyTorch within 2e-06</td><td><span class="pill">DONE</span></td></tr>
+<tr><td>3 — Optimization + benchmark</td><td>Real numbers; outcome was counterintuitive</td><td><span class="pill">DONE</span></td></tr>
+<tr><td>4 — Containerization</td><td>562 MB image, no PyTorch, working endpoint</td><td><span class="pill">DONE</span></td></tr>
+<tr><td>5 — Documentation</td><td>README.md, explainer.html, results.html</td><td><span class="pill">DONE</span></td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2 id="phase1">Phase 1 — PyTorch baseline</h2>
+
+<p>
+Ran <code>python -m scripts.phase1_baseline</code> on 8 DSLR JPGs you provided
+(~11–22 MB each). Results:
+</p>
+
+<table>
+<tr><th>Image</th><th>Latency</th><th>Detections (score ≥ 0.5)</th></tr>
+<tr><td>DSC07061.JPG</td><td>1261 ms (first run, warmup)</td><td>person 0.86</td></tr>
+<tr><td>DSC07165.JPG</td><td>294 ms</td><td>person 0.75</td></tr>
+<tr><td>DSC07201.JPG</td><td>224 ms</td><td>person 0.86</td></tr>
+<tr><td>DSC07215.JPG</td><td>259 ms</td><td>(none)</td></tr>
+<tr><td>DSC07220.JPG</td><td>285 ms</td><td>(none)</td></tr>
+<tr><td>DSC07312.JPG</td><td>253 ms</td><td>(none)</td></tr>
+<tr><td>DSC07346.JPG</td><td>254 ms</td><td>person 0.98, horse 0.54, bench 0.50</td></tr>
+<tr><td>DSC07347.JPG</td><td>239 ms</td><td>teddy bear 0.71, person 0.59</td></tr>
+</table>
+
+<p>
+Bounding-box visualizations were saved to <code>outputs/*_phase1.png</code>. You
+confirmed they looked reasonable.
+</p>
+
+<p><strong>Things to read into the numbers honestly:</strong></p>
+<ul>
+  <li><strong>The first-image latency of 1261 ms vs steady-state ~250 ms</strong> is the classic warmup effect. Subsequent benchmarks discarded the warmup.</li>
+  <li><strong>Three images had no detections</strong> at score ≥ 0.5. Likely either (a) the photo contains no COCO classes, or (b) SSDLite is the small model and is unsure.</li>
+  <li><strong>"Horse" and "teddy bear" labels are probably wrong</strong> — SSDLite is the cheapest detector torchvision ships. The project isn't about accuracy; it's about the pipeline.</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2 id="phase2">Phase 2 — ONNX export and parity</h2>
+
+<h3>Export</h3>
+<p>
+<code>scripts/phase2_export_onnx.py</code> produced <code>models/detector.onnx</code>
+(13.5 MB). About 30 <code>TracerWarning</code>s appeared during export — all
+variants of <em>"this Python int got baked into the graph as a constant"</em>
+(image mean/std, anchor counts, an internal NMS branch). None of them mattered
+in practice.
+</p>
+
+<p>The exported graph signature was exactly what we wanted:</p>
+<pre><code>inputs:  [('image', [3, 'height', 'width'])]
+outputs: [('boxes',  ['num_detections', 4]),
+          ('scores', ['num_detections']),
+          ('labels', ['num_detections'])]
+nodes:   3442</code></pre>
+
+<h3>Parity check</h3>
+<p>
+<code>scripts/phase2_parity.py</code> ran both backends on all 8 images at a
+low score threshold (0.05) to capture nearly all raw detections, and compared
+boxes/scores/labels element-by-element after sorting:
+</p>
+
+<pre><code>parity check: PyTorch vs ONNX Runtime, threshold=0.05
+tolerances: score &lt; 0.001, box &lt; 1.0px
+
+  [OK ] DSC07061.JPG  n=180  max|Δscore|=1.97e-06  max|Δbox|=0.00px  label_mismatches=0
+  [OK ] DSC07165.JPG  n= 71  max|Δscore|=1.88e-06  max|Δbox|=0.00px  label_mismatches=0
+  [OK ] DSC07201.JPG  n=246  max|Δscore|=1.92e-06  max|Δbox|=0.00px  label_mismatches=0
+  [OK ] DSC07215.JPG  n=139  max|Δscore|=1.82e-06  max|Δbox|=0.00px  label_mismatches=0
+  [OK ] DSC07220.JPG  n=203  max|Δscore|=1.67e-06  max|Δbox|=0.00px  label_mismatches=0
+  [OK ] DSC07312.JPG  n= 44  max|Δscore|=8.94e-07  max|Δbox|=0.00px  label_mismatches=0
+  [OK ] DSC07346.JPG  n=130  max|Δscore|=1.19e-06  max|Δbox|=0.00px  label_mismatches=0
+  [OK ] DSC07347.JPG  n= 35  max|Δscore|=1.65e-06  max|Δbox|=0.00px  label_mismatches=0
+
+8/8 images passed</code></pre>
+
+<p>
+<strong>Conclusion:</strong> PyTorch and ONNX are numerically the same model. Maximum
+score drift was 1.97e-06 (essentially float epsilon); boxes agreed to within
+0 pixels. The TracerWarnings were noise, not signal.
+</p>
+
+<!-- ============================================================ -->
+<h2 id="phase3">Phase 3 — The counterintuitive benchmark</h2>
+
+<h3>The model variants we produced</h3>
+<table>
+<tr><th>File</th><th>Size</th><th>What it is</th></tr>
+<tr><td><code>detector.onnx</code></td><td>13.5 MB</td><td>Original FP32 export</td></tr>
+<tr><td><code>detector_optimized.onnx</code></td><td>13.4 MB</td><td>After ORT_ENABLE_ALL graph optimization</td></tr>
+<tr><td><code>detector_quantized.onnx</code></td><td>4.2 MB</td><td>Dynamic INT8 quantization (3.2× smaller)</td></tr>
+</table>
+
+<h3>The benchmark methodology</h3>
+<ul>
+  <li><strong>Image:</strong> DSC07061.JPG (6000×4000). The model resizes to 320×320 internally.</li>
+  <li><strong>Hardware:</strong> Apple M-series, macOS 26.4, CPU only.</li>
+  <li><strong>Scope:</strong> only the model forward pass is timed. Image decoding and preprocessing happen once, before the timer.</li>
+  <li><strong>Warmup:</strong> 3 runs discarded.</li>
+  <li><strong>Measure:</strong> 30 timed runs per backend.</li>
+</ul>
+
+<h3>The numbers</h3>
+<table>
+<tr><th>Backend</th><th>Median</th><th>p95</th><th>p99</th><th>Min</th><th>Speedup vs PyTorch</th></tr>
+<tr><td>PyTorch fp32</td><td>61.3 ms</td><td>64.3 ms</td><td>66.0 ms</td><td>59.1 ms</td><td><strong>1.00x</strong></td></tr>
+<tr><td>ONNX fp32 (no opt)</td><td>94.7 ms</td><td>100.2 ms</td><td>103.6 ms</td><td>91.9 ms</td><td>0.65x</td></tr>
+<tr><td>ONNX fp32 (graph opt)</td><td>95.2 ms</td><td>101.9 ms</td><td>104.5 ms</td><td>91.9 ms</td><td>0.64x</td></tr>
+<tr><td>ONNX INT8 quantized</td><td>100.5 ms</td><td>105.3 ms</td><td>106.3 ms</td><td>99.0 ms</td><td>0.61x</td></tr>
+</table>
+
+<p>Detection counts at score ≥ 0.5: PyTorch 1, ONNX FP32 (both) 1, ONNX INT8 <strong>0</strong>.</p>
+
+<h3>Why this happened — and why the result is actually a win</h3>
+
+<p>
+The tutorial-blog narrative says "ONNX makes things faster, quantization makes things even faster." That's wrong on this hardware, and we have the numbers to prove it. Three concrete reasons:
+</p>
+
+<ol>
+  <li><strong>Apple Silicon arm64 favors PyTorch.</strong> Torch 2.x ships native arm64 kernels that go through Apple's Accelerate framework. ONNX Runtime's <code>CPUExecutionProvider</code> uses a generic CPU implementation that doesn't tap into Accelerate. The "ONNX is faster" claim holds on hardware ONNX was designed for: x86 servers, NVIDIA Jetson, ARM Cortex with INT8 silicon. Not Apple Silicon CPU.</li>
+  <li><strong>Dynamic INT8 quantization inserts conversion overhead.</strong> Every time an INT8 op feeds into a non-quantized op (and vice versa), runtime needs to convert. On a CPU without native INT8 acceleration, those conversion ops cost more than the INT8 math saves.</li>
+  <li><strong>Quantization erodes precision near thresholds.</strong> A borderline detection (score ~0.5) crossed the threshold and dropped out. Static quantization (with calibration data) would mitigate this; dynamic quantization can't.</li>
+</ol>
+
+<div class="note">
+<strong>The interview story this enables is much stronger than "I got a 2× speedup":</strong>
+<blockquote>
+"I measured the canonical PyTorch→ONNX→quantized pipeline on my Apple Silicon laptop and found ONNX Runtime ran 50% slower than PyTorch, and dynamic INT8 quantization made it worse — and dropped a borderline detection. I can explain why: torch ships Accelerate-backed kernels that ORT's generic CPU provider can't match, and dynamic quantization adds quantize/dequantize overhead at layer boundaries on hardware without native INT8 support. The fix would be either ORT's CoreML execution provider, or static quantization with calibration data, or running the same pipeline on an x86 server or NVIDIA Jetson — which is the hardware ONNX was designed for. That's the next experiment."
+</blockquote>
+That answer signals you read benchmark data, know there are platform-specific reasons quantization is/isn't a win, and can design follow-up experiments. It's much better than parroting a tutorial.
+</div>
+
+<!-- ============================================================ -->
+<h2 id="phase4">Phase 4 — Docker image</h2>
+
+<h3>What got built</h3>
+<p>
+Multi-stage Dockerfile, <strong>562 MB final image</strong>. Compare to what a naïve single-stage build with PyTorch in it would have produced: ~2 GB. The difference is the entire training stack — torch, torchvision, CUDA libs, sympy, networkx — none of which the inference container needs.
+</p>
+
+<p>What's actually inside the runtime image:</p>
+<ul>
+  <li><code>python:3.12-slim</code> base (~150 MB)</li>
+  <li>ONNX Runtime native libraries (~150 MB)</li>
+  <li>NumPy, FastAPI, Pillow, uvicorn (~100 MB)</li>
+  <li>The model files: <code>detector.onnx</code> (14 MB) + <code>coco_classes.json</code></li>
+  <li>The application code (<code>src/</code> + <code>app/</code>): a few KB</li>
+</ul>
+
+<h3>Smoke test</h3>
+<p>
+<code>docker compose up</code>, then a <code>curl</code> against the live container:
+</p>
+<pre><code>$ curl -F "image=@data/samples/DSC07346.JPG" http://localhost:8000/predict
+
+{
+  "filename": "DSC07346.JPG",
+  "n_detections": 3,
+  "latency_ms": 738.2,
+  "detections": [
+    {"label": "person", "score": 0.9844, "box": [3119.2, 1157.2, 4784.4, 3964.9]},
+    {"label": "horse",  "score": 0.5354, "box": [1347.9, 1271.9, 3089.0, 3947.2]},
+    {"label": "bench",  "score": 0.5000, "box": [459.1,  1646.3, 4285.2, 3831.1]}
+  ]
+}</code></pre>
+
+<p>
+Identical detections (same labels, same scores to 4 decimal places) as the bare-metal CLI. Container latency was higher (738 ms vs 489 ms direct) — most likely due to Rosetta amd64 emulation on Apple Silicon. A native <code>--platform linux/arm64</code> build target would close that gap.
+</p>
+
+<!-- ============================================================ -->
+<h2 id="files">Final files on disk</h2>
+
+<pre><code>ML Ops/
+├── README.md                     ← project face for recruiters
+├── PROJECT_CONTEXT.md            ← original spec (unchanged)
+├── explainer.html                ← concepts and how-it-works
+├── results.html                  ← this file
+├── requirements.txt              ← dev (with torch)
+├── requirements-inference.txt    ← runtime (no torch)
+├── Dockerfile                    ← multi-stage
+├── docker-compose.yml
+├── .dockerignore
+├── .gitignore
+├── src/inference/
+│   ├── model.py                  ← load PyTorch detector
+│   ├── predict.py                ← PyTorch backend
+│   └── predict_onnx.py           ← ONNX backend (no torch import)
+├── app/server.py                 ← FastAPI service
+├── scripts/
+│   ├── phase1_baseline.py
+│   ├── phase2_export_onnx.py
+│   ├── phase2_parity.py
+│   ├── phase3_optimize.py
+│   └── phase3_benchmark.py
+├── models/
+│   ├── detector.onnx             13.5 MB
+│   ├── detector_optimized.onnx   13.4 MB
+│   ├── detector_quantized.onnx    4.2 MB
+│   └── coco_classes.json
+├── data/samples/                 ← your 8 test images
+└── outputs/
+    ├── *_phase1.png              ← bounding-box visualizations
+    └── phase3_benchmark.json     ← raw benchmark data
+</code></pre>
+
+<!-- ============================================================ -->
+<h2>The resume bullet, supported by what we measured</h2>
+
+<blockquote>
+<em>Built an end-to-end computer vision inference pipeline: exported a pretrained
+PyTorch object detector to ONNX, verified numerical parity (max drift 2e-06
+across sample images), applied ONNX Runtime graph optimization and dynamic INT8
+quantization, containerized via multi-stage Docker (562 MB image with no PyTorch),
+and benchmarked latency honestly — including a result that ran counter to the
+ONNX tutorial-blog narrative and required explanation.</em>
+</blockquote>
+
+<hr>
+<p class="crosslink">For the conceptual primer of what each phase does and why, see <a href="explainer.html">explainer.html</a>.</p>
+
+</body>
+</html>

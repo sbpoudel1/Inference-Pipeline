@@ -1,0 +1,8 @@
+services:
+  inference:
+    build: .
+    image: cv-inference:latest
+    container_name: cv-inference
+    ports:
+      - "8000:8000"
+    restart: unless-stopped

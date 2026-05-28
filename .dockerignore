@@ -1,0 +1,12 @@
+.venv/
+.git/
+__pycache__/
+*.pyc
+data/
+outputs/
+scripts/
+models/detector_optimized.onnx
+models/detector_quantized.onnx
+*.md
+*.html
+.DS_Store

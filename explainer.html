@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>CV Inference Pipeline — Explainer</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 860px;
+    margin: 40px auto;
+    padding: 0 24px 80px;
+    line-height: 1.55;
+    color: #1f2328;
+    background: #fdfdfc;
+  }
+  h1 { border-bottom: 2px solid #1f2328; padding-bottom: 8px; }
+  h2 { margin-top: 40px; border-bottom: 1px solid #d0d7de; padding-bottom: 4px; }
+  h3 { margin-top: 28px; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
+  code { background: #eef1f4; padding: 1px 5px; border-radius: 3px; }
+  pre {
+    background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px;
+    padding: 12px 14px; overflow-x: auto; line-height: 1.45;
+  }
+  pre code { background: transparent; padding: 0; }
+  .note { background: #fff8e1; border-left: 4px solid #d4a017; padding: 10px 14px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+  .gap  { background: #fdecea; border-left: 4px solid #c0392b; padding: 10px 14px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+  th, td { border: 1px solid #d0d7de; padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { background: #f6f8fa; }
+  .toc { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px; padding: 12px 20px; }
+  .toc ol { margin: 6px 0; }
+  hr { border: none; border-top: 1px solid #d0d7de; margin: 32px 0; }
+  .crosslink { font-size: 0.9em; color: #57606a; }
+  a { color: #0969da; }
+</style>
+</head>
+<body>
+
+<h1>CV Inference Pipeline — Explainer</h1>
+<p class="crosslink">Plain-English explanation of what this project is and how each piece works. For the actual results we measured, see <a href="results.html">results.html</a>.</p>
+
+<div class="toc">
+<strong>Contents</strong>
+<ol>
+  <li><a href="#bigpicture">The big picture</a></li>
+  <li><a href="#layout">What's on disk</a></li>
+  <li><a href="#phase1">Phase 1 — Baseline (the PyTorch model)</a></li>
+  <li><a href="#phase2">Phase 2 — ONNX export and parity</a></li>
+  <li><a href="#phase3">Phase 3 — Optimize and benchmark</a></li>
+  <li><a href="#phase4">Phase 4 — Containerize as a service</a></li>
+  <li><a href="#phase5">Phase 5 — Documentation</a></li>
+  <li><a href="#concepts">Concepts that may be new to you</a></li>
+  <li><a href="#run">How to run each phase</a></li>
+</ol>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="bigpicture">1. The big picture</h2>
+
+<p>
+This project closes six resume gaps — <strong>computer vision, PyTorch, ONNX, ONNX Runtime, Docker, benchmarking</strong> — in one focused build, so you can speak credibly to the Symbotic MLOps role.
+</p>
+
+<p>The arc, in one diagram:</p>
+<pre><code>PyTorch model  →  ONNX export  →  Optimized + quantized ONNX  →  FastAPI in Docker
+   (Phase 1)       (Phase 2)            (Phase 3)                    (Phase 4)
+                                            ↓
+                                     Benchmark numbers
+                                  (the interview artifact)
+</code></pre>
+
+<p>
+In plain English: take a model that someone already trained, convert it into a format that can run anywhere, make it faster, wrap it in a tiny web service, put that service in a box that can ship to any machine, and measure how all of this performs honestly. That's what an MLOps engineer does for a living.
+</p>
+
+<!-- ============================================================ -->
+<h2 id="layout">2. What's on disk</h2>
+
+<pre><code>ML Ops/
+├── README.md                    ← project face for recruiters
+├── PROJECT_CONTEXT.md           ← original spec
+├── explainer.html               ← this file
+├── results.html                 ← what we actually measured
+├── requirements.txt             ← dev environment (with torch)
+├── requirements-inference.txt   ← runtime environment (no torch)
+├── Dockerfile                   ← multi-stage
+├── docker-compose.yml
+├── .dockerignore
+├── .gitignore
+├── src/inference/
+│   ├── model.py                 ← load PyTorch detector
+│   ├── predict.py               ← PyTorch backend
+│   └── predict_onnx.py          ← ONNX backend (no torch import)
+├── app/server.py                ← FastAPI service
+├── scripts/
+│   ├── phase1_baseline.py       ← PyTorch sanity check
+│   ├── phase2_export_onnx.py    ← torch.onnx.export
+│   ├── phase2_parity.py         ← PyTorch vs ONNX comparison
+│   ├── phase3_optimize.py       ← graph opt + INT8 quantization
+│   └── phase3_benchmark.py      ← latency measurement
+├── models/                      ← the .onnx files (~14 MB each)
+├── data/samples/                ← your test images
+└── outputs/                     ← bbox visualizations + benchmark JSON
+</code></pre>
+
+<p>
+Two requirements files is intentional. The dev environment has everything (PyTorch + tools to run the export). The runtime environment has only what the deployed service actually needs. <strong>That separation is one of the core MLOps lessons of this project.</strong>
+</p>
+
+<!-- ============================================================ -->
+<h2 id="phase1">3. Phase 1 — Baseline (the PyTorch model)</h2>
+
+<p>
+<strong>Goal:</strong> get a pretrained object detector running on real images locally. Confirm it produces sensible bounding boxes.
+</p>
+
+<h3>What we used</h3>
+<p>
+<strong>SSDLite320 with a MobileNetV3-Large backbone</strong>, pretrained on COCO. Decoded:
+</p>
+<ul>
+  <li><strong>SSDLite</strong> — Single Shot Detector, "Lite" variant. Fast, small.</li>
+  <li><strong>320</strong> — input image size in pixels (the model resizes everything to 320×320 internally).</li>
+  <li><strong>MobileNetV3-Large</strong> — the convolutional backbone that extracts features. Designed for mobile/edge use.</li>
+  <li><strong>COCO</strong> — the dataset it was trained on. 80 everyday object classes (person, car, dog, bench, etc.).</li>
+</ul>
+
+<h3>The three files</h3>
+
+<p><code>src/inference/model.py</code> — one function, <code>load_detector()</code>, that returns the model, its preprocessing transform, and the list of class names. The first call downloads ~14 MB of weights to <code>~/.cache/torch/hub/</code> and reuses them forever.</p>
+
+<p><code>src/inference/predict.py</code> — wraps the model in a clean function: <code>predict(image_path) → list of detections</code>. Each detection is a plain Python dict with <code>label</code>, <code>score</code>, and <code>box</code>. No PyTorch tensors leak out — that matters because in Phase 2 we swap the backend and the caller shouldn't have to change.</p>
+
+<p><code>scripts/phase1_baseline.py</code> — the driver. Loops over images in <code>data/samples/</code>, calls <code>predict()</code>, prints results, and saves a PNG with the bounding boxes drawn on the image.</p>
+
+<!-- ============================================================ -->
+<h2 id="phase2">4. Phase 2 — ONNX export and parity</h2>
+
+<p>
+<strong>Goal:</strong> convert the PyTorch model to a portable format (ONNX) that can run without PyTorch installed. Then prove the converted model still behaves like the original.
+</p>
+
+<h3>What ONNX is, in plain terms</h3>
+<p>
+ONNX (Open Neural Network Exchange) is a file format for neural networks. Think of it as a "PDF for models" — once you save your model as <code>.onnx</code>, anyone with an ONNX runtime can load and run it, no matter what framework they use. Python is no longer required to run the model. C++ can run it. Java can run it. A custom binary on a robot can run it. That portability is the whole point.
+</p>
+
+<h3>The two scripts</h3>
+
+<p><code>scripts/phase2_export_onnx.py</code> uses <code>torch.onnx.export(...)</code> to do the conversion. Three subtle things matter here:</p>
+<ul>
+  <li><strong>A wrapper module.</strong> The torchvision detector takes a list of tensors and returns a list of dicts. ONNX doesn't love that shape; we wrap it so the export sees a single-tensor input and three-tensor output (boxes, scores, labels).</li>
+  <li><strong>Dynamic axes.</strong> We tell ONNX which dimensions can vary at runtime: image height/width, and the number of detections. Without this, the exported model is locked to whatever size we used during export.</li>
+  <li><strong>Opset version.</strong> ONNX has an "instruction set" version (opset). We picked 17 — modern enough to have all the ops the model uses, old enough that every runtime understands it.</li>
+</ul>
+
+<p><code>scripts/phase2_parity.py</code> is the bug-catcher. It runs both backends on the same images and asks: do they produce the same number of detections? With the same labels? With scores agreeing to 3 decimal places? Boxes within 1 pixel?</p>
+
+<p>
+<strong>Why this script is the interview-relevant part:</strong> ONNX export is a translation, not a copy. Operations can be replaced with near-equivalents. Floating-point math can be reordered. NMS (the "non-maximum suppression" step that picks the best box per object) can differ between implementations. The parity test is what tells you if any of that matters in practice. If it fails, debugging it is the kind of work that makes you valuable.
+</p>
+
+<!-- ============================================================ -->
+<h2 id="phase3">5. Phase 3 — Optimize and benchmark</h2>
+
+<p>
+<strong>Goal:</strong> make the model faster, and measure honestly how much faster.
+</p>
+
+<h3>Two optimization techniques</h3>
+
+<p><strong>Graph optimization.</strong> The model's compute graph has redundancies. For example, a Conv → BatchNorm → ReLU sequence can be mathematically merged into a single fused operation. ONNX Runtime can do this automatically. It's pure graph surgery — same numerical output, fewer/faster operations.</p>
+
+<p><strong>Dynamic INT8 quantization.</strong> Model weights are normally stored as 32-bit floats. Dynamic quantization casts them to 8-bit integers. The file shrinks ~4x. Integer math can be faster than floating-point math on many CPUs. The trade is a small loss of numerical precision.</p>
+
+<p>The phase produces three variants of the model, all sitting in <code>models/</code>:</p>
+<ul>
+  <li><code>detector.onnx</code> — the original FP32 export</li>
+  <li><code>detector_optimized.onnx</code> — same graph after ORT's optimization pass</li>
+  <li><code>detector_quantized.onnx</code> — INT8 quantized weights</li>
+</ul>
+
+<h3>The benchmark</h3>
+
+<p><code>scripts/phase3_benchmark.py</code> compares latency across four backends:</p>
+<ol>
+  <li>PyTorch (the baseline)</li>
+  <li>ONNX, no graph optimization</li>
+  <li>ONNX, with graph optimization</li>
+  <li>ONNX, INT8 quantized + graph optimization</li>
+</ol>
+
+<p>It does <strong>3 warmup runs</strong> (discarded — caches and JIT compilation need to settle) and then <strong>30 measured runs</strong>. Reports median, p95, and p99 latency.</p>
+
+<div class="note">
+The actual numbers were surprising. See <a href="results.html#phase3">results.html → Phase 3</a>.
+</div>
+
+<!-- ============================================================ -->
+<h2 id="phase4">6. Phase 4 — Containerize as a service</h2>
+
+<p>
+<strong>Goal:</strong> wrap the inference in a web service, package it in a Docker image, and confirm the image is small and self-contained.
+</p>
+
+<h3>The FastAPI service</h3>
+<p>
+<code>app/server.py</code> exposes two endpoints:
+</p>
+<ul>
+  <li><code>GET /</code> — health check, returns <code>{"status":"ok"}</code></li>
+  <li><code>POST /predict</code> — accepts an image upload, returns JSON detections</li>
+</ul>
+<p>
+The service imports only <code>src/inference/predict_onnx.py</code>. That file has zero PyTorch dependency — it uses <code>onnxruntime</code> directly. <strong>That's what makes the Docker image small.</strong>
+</p>
+
+<h3>Multi-stage Docker</h3>
+<p>
+The <code>Dockerfile</code> has two stages:
+</p>
+<ol>
+  <li><strong>Builder stage.</strong> Uses <code>python:3.12-slim</code> as base. Installs everything from <code>requirements-inference.txt</code> (no torch!) into a virtual environment. This stage contains pip's cache, build artifacts, etc.</li>
+  <li><strong>Runtime stage.</strong> Also <code>python:3.12-slim</code> base. Copies <em>only</em> the virtual environment and the application code from the builder. No pip cache. No build tools. No PyTorch.</li>
+</ol>
+<p>
+The result: the deployed image contains <em>only</em> what's needed to actually serve predictions. The "training stack" (PyTorch, torchvision, CUDA libraries, sympy, etc.) is left behind in the builder stage and never ships.
+</p>
+
+<p>
+That's the "no Python on the robot" lesson made literal. Symbotic's robots don't run PyTorch — they run a compiled runtime against an exported model. Our Docker image is the desktop equivalent of that production handoff.
+</p>
+
+<!-- ============================================================ -->
+<h2 id="phase5">7. Phase 5 — Documentation</h2>
+
+<p>
+<strong>Goal:</strong> a real <code>README.md</code> that a recruiter or hiring manager can read in 60 seconds and understand the project.
+</p>
+
+<p>The README contains:</p>
+<ul>
+  <li>One-paragraph description of what this is and why</li>
+  <li>Architecture diagram (mermaid syntax — renders on GitHub automatically)</li>
+  <li>Repo layout</li>
+  <li>How to run it</li>
+  <li>The benchmark table</li>
+  <li>"What I learned" — honest takeaways including the counterintuitive parts</li>
+  <li>"What I would do next" — shows you can extend the work</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2 id="concepts">8. Concepts that may be new to you</h2>
+
+<h3>Why <code>model.eval()</code> matters</h3>
+<p>
+PyTorch models have two modes: training and eval. Some layers — <strong>BatchNorm</strong> and <strong>Dropout</strong> in particular — behave differently in each. In training, BatchNorm uses statistics of the current mini-batch; in eval, it uses the running statistics accumulated during training. Dropout randomly zeros activations during training and does nothing during eval. If you forget <code>model.eval()</code>, your predictions are silently wrong — not crash-wrong, just degraded-wrong. Classic PyTorch footgun; the kind of thing an interviewer might ask.
+</p>
+
+<h3>What "preprocess transforms" really do</h3>
+<p>
+A neural net was trained on inputs of a specific shape and value range. SSDLite was trained on 320×320 images with pixel values normalized to specific mean/std numbers. If you feed it a raw 6000×4000 JPG, the answer is garbage. <code>weights.transforms()</code> returns the exact resize+normalize pipeline used during training. Bundling this with the weights is a torchvision convenience that prevents a whole class of bugs.
+</p>
+
+<h3>Why pretrained weights at all?</h3>
+<p>
+We could train a detector from scratch on COCO. It would take many GPU-hours and add nothing to the resume bullet. The MLOps role is about <em>handling</em> models, not training them from scratch. Starting from pretrained mirrors the real workflow: an ML team hands you a model, your job is to make it run fast in production.
+</p>
+
+<h3>What ONNX Runtime actually is</h3>
+<p>
+A piece of software that loads an <code>.onnx</code> file and runs it. Written in C++. Has Python bindings (which is what we use). Has C, C#, Java, JavaScript bindings too. Can target different hardware via "execution providers": CPU, CUDA, CoreML, OpenVINO, TensorRT, etc. On any hardware it knows about, it'll pick the most efficient implementation.
+</p>
+
+<h3>What "dynamic" vs "static" quantization means</h3>
+<p>
+<strong>Dynamic:</strong> weights are quantized to INT8 ahead of time; activations are quantized on the fly each time the model runs. No calibration data needed. Easy. Sometimes works.
+</p>
+<p>
+<strong>Static:</strong> both weights and activations are pre-quantized using statistics gathered from a representative set of input images ("calibration data"). More involved. Usually faster and more accurate than dynamic.
+</p>
+<p>
+We used dynamic in this project. Static would be a Phase 6.
+</p>
+
+<h3>What a multi-stage Docker build buys you</h3>
+<p>
+Before multi-stage, the standard pattern was: one Dockerfile, one image, everything baked in. That meant the build tools, compilers, pip caches, and intermediate files all ended up in your production image. A multi-stage build lets you do the building in one image and then copy <em>just</em> the artifacts you need into a clean second image. Smaller images, fewer attack surfaces, faster deploys.
+</p>
+
+<!-- ============================================================ -->
+<h2 id="run">9. How to run each phase</h2>
+
+<p>From <code>/Users/shashi/Desktop/ML Ops/</code>:</p>
+
+<pre><code># One-time setup
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Drop 2-3 photos with people/cars/animals in data/samples/
+
+# Phase 1: PyTorch baseline
+python -m scripts.phase1_baseline
+
+# Phase 2: ONNX export, then parity check
+python -m scripts.phase2_export_onnx
+python -m scripts.phase2_parity
+
+# Phase 3: optimize + quantize, then benchmark
+python -m scripts.phase3_optimize
+python -m scripts.phase3_benchmark
+
+# Phase 4: containerized service
+pip install -r requirements-inference.txt   # if you want to smoke-test locally first
+docker compose up --build
+curl -F "image=@data/samples/your_image.jpg" http://localhost:8000/predict
+</code></pre>
+
+<div class="gap">
+<strong>Things that might go wrong (and how to handle them):</strong>
+<ul>
+  <li><strong>Slow first run.</strong> Weight download takes ~30 seconds. Subsequent runs reuse the cache.</li>
+  <li><strong>No detections.</strong> Drop the threshold by passing <code>score_threshold=0.3</code> when calling <code>predict()</code>.</li>
+  <li><strong>Wrong labels (e.g. horse on a person photo).</strong> SSDLite is the smallest detector torchvision ships. We chose it for speed; accuracy is what it is.</li>
+  <li><strong>Import errors.</strong> Use <code>python -m scripts.foo</code>, not <code>python scripts/foo.py</code>. The <code>-m</code> form sets up the import paths correctly.</li>
+  <li><strong>Docker daemon not running.</strong> Start Docker Desktop. On macOS: <code>open -a Docker</code>, wait 30 seconds.</li>
+</ul>
+</div>
+
+<hr>
+<p class="crosslink">For the actual measured outcomes, see <a href="results.html">results.html</a>.</p>
+
+</body>
+</html>
